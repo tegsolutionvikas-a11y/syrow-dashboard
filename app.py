@@ -46,9 +46,10 @@ def extract_assigned_person(row):
 
 @st.cache_data
 def process_data(file):
+    # Load data
     df = pd.read_csv(file)
     
-    # Filter for Working status
+    # Filter for Working status and create a fresh copy to avoid SettingWithCopy warnings
     df = df[df['Status'].str.strip().str.lower() == 'working'].copy()
     
     # Priority Mapping
@@ -58,22 +59,29 @@ def process_data(file):
     # Apply smarter assignment logic
     df['Assigned To'] = df.apply(extract_assigned_person, axis=1)
     
-    # Date Calculations
-    df['Created On'] = pd.to_datetime(df['Created On'])
+    # Convert 'Created On' to datetime objects
+    df['Created On'] = pd.to_datetime(df['Created On'], errors='coerce')
+    
+    # Drop rows where date conversion failed to prevent calculation errors
+    df = df.dropna(subset=['Created On'])
+    
     today = datetime.now()
     
-    # NEW: Calculate how many days the ticket has been active (integer)
+    # Calculate how many days the ticket has been active
     df['Active Days'] = (today - df['Created On']).dt.days
     
-    # SLA Calculation logic
-    def get_sla(row):
-        c, p = row['Created On'], row['Priority']
-        hours = {'P1': 4, 'P2': 8, 'P3': 48, 'P4': 96}
-        return c + timedelta(hours=hours.get(p, 0))
+    # --- FIXED SLA CALCULATION ---
+    # We use mapping and vectorized addition instead of row-wise apply
+    hours_map = {'P1': 4, 'P2': 8, 'P3': 48, 'P4': 96}
     
-    df['Expected Completion'] = df.apply(get_sla, axis=1)
+    # Map priorities to hour values (default to 0 if not found)
+    sla_hours = df['Priority'].map(hours_map).fillna(0)
     
-    # Final Table selection (Order: Info -> Assignment -> Aging -> SLA)
+    # Add the timedelta to the creation date
+    df['Expected Completion'] = df['Created On'] + pd.to_timedelta(sla_hours, unit='h')
+    # -----------------------------
+    
+    # Final Table selection (Ordering and Renaming)
     res = df[[
         'Ticket SR#', 'KAM', 'Company', 'Priority', 
         'Ticket Title', 'Assigned To', 'Active Days', 'Expected Completion'
@@ -87,23 +95,37 @@ def process_data(file):
     return res
 
 if uploaded_file:
-    data = process_data(uploaded_file)
-    
-    # KPIs for quick overview
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Active Working Tickets", len(data))
-    m2.metric("Tech Team / Dev Load", len(data[data['Assigned To'].isin(["Tech Team", "Devagiri"])]))
-    m3.metric("Critical (P1/P2)", len(data[data['Priority'].isin(['P1', 'P2'])]))
-    
-    # Table display with formatting for date/time
-    st.dataframe(data, use_container_width=True, hide_index=True)
-    
-    # Export capability
-    st.download_button(
-        label="📥 Download Dashboard CSV", 
-        data=data.to_csv(index=False), 
-        file_name="syrow_active_tickets.csv", 
-        mime="text/csv"
-    )
+    try:
+        data = process_data(uploaded_file)
+        
+        # KPIs for quick overview
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Active Working Tickets", len(data))
+        
+        # Tech load calculation
+        tech_load = len(data[data['Assigned To'].isin(["Tech Team", "Devagiri"])])
+        m2.metric("Tech Team / Dev Load", tech_load)
+        
+        # Critical priority calculation
+        critical_count = len(data[data['Priority'].isin(['P1', 'P2'])])
+        m3.metric("Critical (P1/P2)", critical_count)
+        
+        # Table display
+        st.subheader("Live Ticket Queue")
+        st.dataframe(data, use_container_width=True, hide_index=True)
+        
+        # Export capability
+        csv_data = data.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Dashboard CSV", 
+            data=csv_data, 
+            file_name="syrow_active_tickets.csv", 
+            mime="text/csv"
+        )
+        
+    except Exception as e:
+        st.error(f"An error occurred while processing the file: {e}")
+        st.info("Check if your CSV has the required columns: Ticket SR#, KAM, Company, Severity, Status, Created On, Notes, Ticket Category, Ticket Title")
+
 else:
     st.info("Please upload the Syrow CSV file to view the standardized dashboard.")
