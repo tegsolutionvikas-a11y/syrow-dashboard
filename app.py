@@ -33,7 +33,8 @@ def extract_assigned_person(row):
         match = re.search(pattern, note, re.IGNORECASE)
         if match:
             name = match.group(1).title()
-            if name.lower() not in ['tech', 'still', 'currently', 'team']:
+            # Filter out common false positives
+            if name.lower() not in ['tech', 'still', 'currently', 'team', 'the', 'is']:
                 return name
 
     # 3. Tech Team Fallback
@@ -49,22 +50,24 @@ def process_data(file):
     # Load data
     df = pd.read_csv(file)
     
-    # Filter for active tickets. 
-    # Based on the report, we check for 'Working' status (case-insensitive)
+    # Filter for active tickets (Status: Working)
     df = df[df['Status'].str.strip().str.lower() == 'working'].copy()
     
-    # Priority Mapping: Uses the 'Severity' column from the new report
-    # Map 1->P1, 2->P2, etc.
+    # Priority Mapping based on Severity column
     priority_map = {1: 'P1', 2: 'P2', 3: 'P3', 4: 'P4'}
     df['Priority_Label'] = df['Severity'].map(priority_map)
     
     # Apply assignment logic
     df['Assigned To'] = df.apply(extract_assigned_person, axis=1)
     
-    # Convert 'Created On' to datetime (Format in report: DD-MM-YYYY HH:MM)
+    # --- FIXED DATE CONVERSION ---
+    # dayfirst=True ensures DD-MM-YYYY is read correctly, preventing the 30-day error
     df['Created On'] = pd.to_datetime(df['Created On'], dayfirst=True, errors='coerce')
+    
+    # Drop invalid dates to prevent calculation crashes
     df = df.dropna(subset=['Created On'])
     
+    # Use current time for aging calculation
     today = datetime.now()
     
     # Calculate Active Days
@@ -75,7 +78,7 @@ def process_data(file):
     sla_hours = df['Priority_Label'].map(hours_map).fillna(0)
     df['Expected Completion'] = df['Created On'] + pd.to_timedelta(sla_hours, unit='h')
     
-    # Selecting columns based on the new "Caliper Reports" headers
+    # Selecting and Renaming Columns for Display
     res = df[[
         'Ticket SR#', 'KAM', 'Company', 'Priority_Label', 
         'Ticket Title', 'Assigned To', 'Active Days', 'Expected Completion'
@@ -92,31 +95,37 @@ if uploaded_file:
     try:
         data = process_data(uploaded_file)
         
-        # KPIs
+        # Dashboard KPIs
         m1, m2, m3 = st.columns(3)
         m1.metric("Active Working Tickets", len(data))
         
+        # Load for specific technical resources
         tech_load = len(data[data['Assigned To'].isin(["Tech Team", "Devagiri"])])
         m2.metric("Tech Team / Dev Load", tech_load)
         
+        # Count of high-priority tickets
         critical_count = len(data[data['Priority'].isin(['P1', 'P2'])])
         m3.metric("Critical (P1/P2)", critical_count)
         
-        # Display Table
+        # Data Table Display
         st.subheader("Live Ticket Queue (Status: Working)")
-        st.dataframe(data, use_container_width=True, hide_index=True)
+        st.dataframe(
+            data.sort_values(by='Active Days', ascending=False), 
+            use_container_width=True, 
+            hide_index=True
+        )
         
-        # Export
+        # Download Link
         csv_data = data.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Download Dashboard CSV", 
             data=csv_data, 
-            file_name="syrow_active_tickets.csv", 
+            file_name=f"syrow_dashboard_{datetime.now().strftime('%Y%m%d')}.csv", 
             mime="text/csv"
         )
         
     except Exception as e:
-        st.error(f"An error occurred: {e}")
-        st.info("Ensure the CSV contains: Ticket SR#, KAM, Company, Severity, Status, Created On, Notes, Ticket Title")
+        st.error(f"Processing Error: {e}")
+        st.info("Ensure the CSV contains these exact headers: Ticket SR#, KAM, Company, Severity, Status, Created On, Notes, Ticket Title")
 else:
-    st.info("Please upload the Caliper Reports CSV file.")
+    st.info("Please upload the 'Caliper Reports' CSV file to begin.")
