@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # Set page configuration
 st.set_page_config(page_title="Syrow Live Dashboard", layout="wide")
@@ -11,8 +11,8 @@ uploaded_file = st.file_uploader("Upload Syrow CSV", type=["csv"])
 
 def extract_assigned_person(row):
     """
-    Scans Notes, Category, and Title to identify the person or team 
-    currently handling the ticket using Regex.
+    Scans Notes, Ticket Category, and Ticket Title to identify the person or team 
+    handling the ticket using Regex.
     """
     note = str(row['Notes']) if pd.notna(row['Notes']) else ""
     category = str(row['Ticket Category']).lower() if pd.notna(row['Ticket Category']) else ""
@@ -49,41 +49,35 @@ def process_data(file):
     # Load data
     df = pd.read_csv(file)
     
-    # Filter for Working status and create a fresh copy to avoid SettingWithCopy warnings
+    # Filter for active tickets. 
+    # Based on the report, we check for 'Working' status (case-insensitive)
     df = df[df['Status'].str.strip().str.lower() == 'working'].copy()
     
-    # Priority Mapping
+    # Priority Mapping: Uses the 'Severity' column from the new report
+    # Map 1->P1, 2->P2, etc.
     priority_map = {1: 'P1', 2: 'P2', 3: 'P3', 4: 'P4'}
-    df['Priority'] = df['Severity'].map(priority_map)
+    df['Priority_Label'] = df['Severity'].map(priority_map)
     
-    # Apply smarter assignment logic
+    # Apply assignment logic
     df['Assigned To'] = df.apply(extract_assigned_person, axis=1)
     
-    # Convert 'Created On' to datetime objects
-    df['Created On'] = pd.to_datetime(df['Created On'], errors='coerce')
-    
-    # Drop rows where date conversion failed to prevent calculation errors
+    # Convert 'Created On' to datetime (Format in report: DD-MM-YYYY HH:MM)
+    df['Created On'] = pd.to_datetime(df['Created On'], dayfirst=True, errors='coerce')
     df = df.dropna(subset=['Created On'])
     
     today = datetime.now()
     
-    # Calculate how many days the ticket has been active
+    # Calculate Active Days
     df['Active Days'] = (today - df['Created On']).dt.days
     
-    # --- FIXED SLA CALCULATION ---
-    # We use mapping and vectorized addition instead of row-wise apply
+    # SLA CALCULATION
     hours_map = {'P1': 4, 'P2': 8, 'P3': 48, 'P4': 96}
-    
-    # Map priorities to hour values (default to 0 if not found)
-    sla_hours = df['Priority'].map(hours_map).fillna(0)
-    
-    # Add the timedelta to the creation date
+    sla_hours = df['Priority_Label'].map(hours_map).fillna(0)
     df['Expected Completion'] = df['Created On'] + pd.to_timedelta(sla_hours, unit='h')
-    # -----------------------------
     
-    # Final Table selection (Ordering and Renaming)
+    # Selecting columns based on the new "Caliper Reports" headers
     res = df[[
-        'Ticket SR#', 'KAM', 'Company', 'Priority', 
+        'Ticket SR#', 'KAM', 'Company', 'Priority_Label', 
         'Ticket Title', 'Assigned To', 'Active Days', 'Expected Completion'
     ]].copy()
     
@@ -98,23 +92,21 @@ if uploaded_file:
     try:
         data = process_data(uploaded_file)
         
-        # KPIs for quick overview
+        # KPIs
         m1, m2, m3 = st.columns(3)
         m1.metric("Active Working Tickets", len(data))
         
-        # Tech load calculation
         tech_load = len(data[data['Assigned To'].isin(["Tech Team", "Devagiri"])])
         m2.metric("Tech Team / Dev Load", tech_load)
         
-        # Critical priority calculation
         critical_count = len(data[data['Priority'].isin(['P1', 'P2'])])
         m3.metric("Critical (P1/P2)", critical_count)
         
-        # Table display
-        st.subheader("Live Ticket Queue")
+        # Display Table
+        st.subheader("Live Ticket Queue (Status: Working)")
         st.dataframe(data, use_container_width=True, hide_index=True)
         
-        # Export capability
+        # Export
         csv_data = data.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Download Dashboard CSV", 
@@ -124,8 +116,7 @@ if uploaded_file:
         )
         
     except Exception as e:
-        st.error(f"An error occurred while processing the file: {e}")
-        st.info("Check if your CSV has the required columns: Ticket SR#, KAM, Company, Severity, Status, Created On, Notes, Ticket Category, Ticket Title")
-
+        st.error(f"An error occurred: {e}")
+        st.info("Ensure the CSV contains: Ticket SR#, KAM, Company, Severity, Status, Created On, Notes, Ticket Title")
 else:
-    st.info("Please upload the Syrow CSV file to view the standardized dashboard.")
+    st.info("Please upload the Caliper Reports CSV file.")
