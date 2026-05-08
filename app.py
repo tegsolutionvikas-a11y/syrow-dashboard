@@ -60,18 +60,21 @@ def process_data(file):
     # Apply assignment logic
     df['Assigned To'] = df.apply(extract_assigned_person, axis=1)
     
-    # --- FIXED DATE CONVERSION ---
-    # dayfirst=True ensures DD-MM-YYYY is read correctly, preventing the 30-day error
-    df['Created On'] = pd.to_datetime(df['Created On'], dayfirst=True, errors='coerce')
+    # --- FIXED DATE CONVERSION & CALCULATION ---
+    # Using explicit format to match your CSV (DD-MM-YYYY HH:MM)
+    df['Created On'] = pd.to_datetime(df['Created On'], format='%d-%m-%Y %H:%M', errors='coerce')
     
     # Drop invalid dates to prevent calculation crashes
     df = df.dropna(subset=['Created On'])
     
-    # Use current time for aging calculation
-    today = datetime.now()
+    # Use current time (normalized to midnight for accurate calendar day count)
+    today = pd.Timestamp.now().normalize()
     
-    # Calculate Active Days
-    df['Active Days'] = (today - df['Created On']).dt.days
+    # Calculate Active Days (Difference between Today at 00:00 and Created Date at 00:00)
+    df['Active Days'] = (today - df['Created On'].dt.normalize()).dt.days
+    
+    # Prevent negative days in case of future-dated system entries
+    df['Active Days'] = df['Active Days'].clip(lower=0)
     
     # SLA CALCULATION
     hours_map = {'P1': 4, 'P2': 8, 'P3': 48, 'P4': 96}
@@ -95,34 +98,37 @@ if uploaded_file:
     try:
         data = process_data(uploaded_file)
         
-        # Dashboard KPIs
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Active Working Tickets", len(data))
-        
-        # Load for specific technical resources
-        tech_load = len(data[data['Assigned To'].isin(["Tech Team", "Devagiri"])])
-        m2.metric("Tech Team / Dev Load", tech_load)
-        
-        # Count of high-priority tickets
-        critical_count = len(data[data['Priority'].isin(['P1', 'P2'])])
-        m3.metric("Critical (P1/P2)", critical_count)
-        
-        # Data Table Display
-        st.subheader("Live Ticket Queue (Status: Working)")
-        st.dataframe(
-            data.sort_values(by='Active Days', ascending=False), 
-            use_container_width=True, 
-            hide_index=True
-        )
-        
-        # Download Link
-        csv_data = data.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Dashboard CSV", 
-            data=csv_data, 
-            file_name=f"syrow_dashboard_{datetime.now().strftime('%Y%m%d')}.csv", 
-            mime="text/csv"
-        )
+        if data.empty:
+            st.warning("No tickets with status 'Working' found in this file.")
+        else:
+            # Dashboard KPIs
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Active Working Tickets", len(data))
+            
+            # Load for specific technical resources
+            tech_load = len(data[data['Assigned To'].isin(["Tech Team", "Devagiri"])])
+            m2.metric("Tech Team / Dev Load", tech_load)
+            
+            # Count of high-priority tickets
+            critical_count = len(data[data['Priority'].isin(['P1', 'P2'])])
+            m3.metric("Critical (P1/P2)", critical_count)
+            
+            # Data Table Display
+            st.subheader("Live Ticket Queue (Status: Working)")
+            st.dataframe(
+                data.sort_values(by='Active Days', ascending=False), 
+                use_container_width=True, 
+                hide_index=True
+            )
+            
+            # Download Link
+            csv_data = data.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Dashboard CSV", 
+                data=csv_data, 
+                file_name=f"syrow_dashboard_{datetime.now().strftime('%Y%m%d')}.csv", 
+                mime="text/csv"
+            )
         
     except Exception as e:
         st.error(f"Processing Error: {e}")
