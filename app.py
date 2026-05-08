@@ -10,19 +10,14 @@ st.title("📊 Syrow Ticket Management Dashboard")
 uploaded_file = st.file_uploader("Upload Syrow CSV", type=["csv"])
 
 def extract_assigned_person(row):
-    """
-    Scans Notes, Ticket Category, and Ticket Title to identify the person or team 
-    handling the ticket using Regex.
-    """
+    """Identifies the owner using keywords in Notes, Category, and Title."""
     note = str(row['Notes']) if pd.notna(row['Notes']) else ""
     category = str(row['Ticket Category']).lower() if pd.notna(row['Ticket Category']) else ""
     title = str(row['Ticket Title']).lower() if pd.notna(row['Ticket Title']) else ""
     
-    # 1. Check for specific variants of Devagiri / Deva
     if re.search(r'\b(Devagiri|Deva)\b', note, re.IGNORECASE):
         return "Devagiri"
 
-    # 2. Search for "Assigned to / Escalated to [Name]"
     action_patterns = [
         r'(?:assigned to|escalated to|allocated to|moved to|forwarded to)\s+([A-Za-z]+)',
         r'([A-Za-z]+)\s+is\s+working\s+on\s+this',
@@ -33,11 +28,9 @@ def extract_assigned_person(row):
         match = re.search(pattern, note, re.IGNORECASE)
         if match:
             name = match.group(1).title()
-            # Filter out common false positives
             if name.lower() not in ['tech', 'still', 'currently', 'team', 'the', 'is']:
                 return name
 
-    # 3. Tech Team Fallback
     tech_keywords = ['tech', 'developer', 'dev ', 'development', 'backend', 'software']
     combined_text = (note + " " + category + " " + title).lower()
     if any(kw in combined_text for kw in tech_keywords):
@@ -50,38 +43,46 @@ def process_data(file):
     # Load data
     df = pd.read_csv(file)
     
-    # Filter for active tickets (Status: Working)
-    df = df[df['Status'].str.strip().str.lower() == 'working'].copy()
+    # Clean Column Names (removes hidden spaces or quotes)
+    df.columns = df.columns.str.strip().str.replace('"', '').replace("'", "")
     
-    # Priority Mapping based on Severity column
+    # --- ROBUST FILTERING ---
+    # Filter for 'working' (Case-insensitive & strip whitespace)
+    df = df[df['Status'].astype(str).str.strip().str.lower() == 'working'].copy()
+    
+    if df.empty:
+        return pd.DataFrame()
+
+    # Priority Mapping
     priority_map = {1: 'P1', 2: 'P2', 3: 'P3', 4: 'P4'}
-    df['Priority_Label'] = df['Severity'].map(priority_map)
+    # Ensure Severity is numeric for mapping
+    df['Severity'] = pd.to_numeric(df['Severity'], errors='coerce')
+    df['Priority_Label'] = df['Severity'].map(priority_map).fillna('P4')
     
-    # Apply assignment logic
+    # Assignment Logic
     df['Assigned To'] = df.apply(extract_assigned_person, axis=1)
     
-    # --- FIXED DATE CONVERSION & CALCULATION ---
-    # Using explicit format to match your CSV (DD-MM-YYYY HH:MM)
-    df['Created On'] = pd.to_datetime(df['Created On'], format='%d-%m-%Y %H:%M', errors='coerce')
+    # --- FLEXIBLE DATE CONVERSION ---
+    # We remove 'format=' to let Pandas automatically detect if it's YYYY-MM-DD or DD-MM-YYYY
+    df['Created On'] = pd.to_datetime(df['Created On'], dayfirst=True, errors='coerce')
     
-    # Drop invalid dates to prevent calculation crashes
+    # Clean up any rows where the date failed to parse
     df = df.dropna(subset=['Created On'])
     
-    # Use current time (normalized to midnight for accurate calendar day count)
+    if df.empty:
+        return pd.DataFrame()
+    
+    # --- ACTIVE DAYS CALCULATION (Calendar Days) ---
     today = pd.Timestamp.now().normalize()
-    
-    # Calculate Active Days (Difference between Today at 00:00 and Created Date at 00:00)
     df['Active Days'] = (today - df['Created On'].dt.normalize()).dt.days
+    df['Active Days'] = df['Active Days'].clip(lower=0) # No negative days
     
-    # Prevent negative days in case of future-dated system entries
-    df['Active Days'] = df['Active Days'].clip(lower=0)
-    
-    # SLA CALCULATION
+    # SLA Calculation
     hours_map = {'P1': 4, 'P2': 8, 'P3': 48, 'P4': 96}
     sla_hours = df['Priority_Label'].map(hours_map).fillna(0)
     df['Expected Completion'] = df['Created On'] + pd.to_timedelta(sla_hours, unit='h')
     
-    # Selecting and Renaming Columns for Display
+    # Selection & Rename
     res = df[[
         'Ticket SR#', 'KAM', 'Company', 'Priority_Label', 
         'Ticket Title', 'Assigned To', 'Active Days', 'Expected Completion'
@@ -99,21 +100,19 @@ if uploaded_file:
         data = process_data(uploaded_file)
         
         if data.empty:
-            st.warning("No tickets with status 'Working' found in this file.")
+            st.warning("No tickets with status 'Working' were found. Check your CSV filters.")
         else:
-            # Dashboard KPIs
+            # Metrics
             m1, m2, m3 = st.columns(3)
             m1.metric("Active Working Tickets", len(data))
             
-            # Load for specific technical resources
             tech_load = len(data[data['Assigned To'].isin(["Tech Team", "Devagiri"])])
             m2.metric("Tech Team / Dev Load", tech_load)
             
-            # Count of high-priority tickets
             critical_count = len(data[data['Priority'].isin(['P1', 'P2'])])
             m3.metric("Critical (P1/P2)", critical_count)
             
-            # Data Table Display
+            # Queue Table
             st.subheader("Live Ticket Queue (Status: Working)")
             st.dataframe(
                 data.sort_values(by='Active Days', ascending=False), 
@@ -121,7 +120,7 @@ if uploaded_file:
                 hide_index=True
             )
             
-            # Download Link
+            # Download
             csv_data = data.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Download Dashboard CSV", 
@@ -131,7 +130,6 @@ if uploaded_file:
             )
         
     except Exception as e:
-        st.error(f"Processing Error: {e}")
-        st.info("Ensure the CSV contains these exact headers: Ticket SR#, KAM, Company, Severity, Status, Created On, Notes, Ticket Title")
+        st.error(f"Dashboard Error: {e}")
 else:
     st.info("Please upload the 'Caliper Reports' CSV file to begin.")
