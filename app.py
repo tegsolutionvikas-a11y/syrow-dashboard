@@ -68,12 +68,11 @@ def process_data(file):
         else: 
             delta = timedelta(days=4)
         
-        # 3. Calculate Target Completion Date
+        # 3. Calculate Target Completion Date (Formatted as DD/MM/YY HH:MM)
         expected_dt = created_dt + delta
-        expected_str = expected_dt.strftime('%m/%d/%Y %H:%M')
+        expected_str = expected_dt.strftime('%d/%m/%y %H:%M')
 
         # 4. Universal Countdown / Aging Logic
-        # Remaining time from NOW until Expected Completion
         remaining_seconds = (expected_dt - now).total_seconds()
         days_remaining = int(remaining_seconds // 86400)
 
