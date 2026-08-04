@@ -53,29 +53,34 @@ def process_data(file):
         if not created_dt:
             continue
 
-        # 2. Calculate Active Days (Force to a simple whole number)
-        seconds_diff = (now - created_dt).total_seconds()
-        active_days = int(seconds_diff // 86400)
-
-        # 3. Calculate Severity & Expected Completion
+        # 2. Extract Severity & Assign Defined TAT Delta
         try:
             sev = int(row['Severity'])
         except:
             sev = 4
             
-        if sev == 1: delta = timedelta(hours=4)
-        elif sev == 2: delta = timedelta(hours=8)
-        elif sev == 3: delta = timedelta(hours=48)
-        else: delta = timedelta(days=4)
+        if sev == 1: 
+            delta = timedelta(hours=4)
+        elif sev == 2: 
+            delta = timedelta(hours=8)
+        elif sev == 3: 
+            delta = timedelta(days=3)
+        else: 
+            delta = timedelta(days=4)
         
+        # 3. Calculate Target Completion Date
         expected_dt = created_dt + delta
-        # Format as simple text string immediately
         expected_str = expected_dt.strftime('%m/%d/%Y %H:%M')
 
-        # 4. Map Priority
+        # 4. Universal Countdown / Aging Logic
+        # Remaining time from NOW until Expected Completion
+        remaining_seconds = (expected_dt - now).total_seconds()
+        days_remaining = int(remaining_seconds // 86400)
+
+        # 5. Map Priority Header
         priority_map = {1: 'P1', 2: 'P2', 3: 'P3', 4: 'P4'}
         
-        # 5. Build clean dictionary (All values are simple strings or ints)
+        # 6. Build clean row record
         final_rows.append({
             'Ticket No': str(row['Ticket SR#']),
             'KAM Name': str(row['KAM']),
@@ -83,7 +88,7 @@ def process_data(file):
             'Priority': priority_map.get(sev, 'P4'),
             'Issue Statement': str(row['Ticket Title']),
             'Assigned To': extract_handler(row.get('Notes', ''), row.get('Ticket Category', ''), row.get('Ticket Title', '')),
-            'Active Days': str(active_days), # Forced to string to stop the '3232' bug
+            'Days Remaining': str(days_remaining),
             'Expected Completion': expected_str
         })
 
@@ -96,31 +101,30 @@ if uploaded_file:
         if data.empty:
             st.warning("No tickets with status 'Working' found.")
         else:
-            # Metrics
+            # Key Performance Indicators
             c1, c2, c3 = st.columns(3)
             c1.metric("Active Tickets", len(data))
             c2.metric("Critical (P1/P2)", len(data[data['Priority'].isin(['P1', 'P2'])]))
             
-            # Use the plain string for the metric to avoid errors
-            oldest = max([int(x) for x in data['Active Days']])
-            c3.metric("Oldest (Days)", oldest)
+            # Count overdue tickets across all priorities (Days Remaining < 0)
+            overdue_count = sum(1 for x in data['Days Remaining'] if int(x) < 0)
+            c3.metric("Overdue Tickets", overdue_count)
 
-            # Display the table
+            # Display the main Queue
             st.subheader("Live Ticket Queue")
             
-            # Sort by Active Days (converting back to int just for the sort)
-            data['sort_col'] = data['Active Days'].astype(int)
-            display_df = data.sort_values('sort_col', ascending=False).drop(columns=['sort_col'])
+            # Sort ascending so negative/overdue tickets stay at top
+            data['sort_col'] = data['Days Remaining'].astype(int)
+            display_df = data.sort_values('sort_col', ascending=True).drop(columns=['sort_col'])
             
-            # Use st.table (static) instead of st.dataframe (interactive) 
-            # because st.dataframe is what is causing the formatting bug.
+            # Static table prevents UI formatting glitches
             st.table(display_df)
 
-            # Download CSV
-            csv = data.drop(columns=['sort_col'] if 'sort_col' in data else []).to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download Report", csv, "syrow_report.csv", "text/csv")
+            # Clean CSV export
+            csv_data = display_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Report", csv_data, "syrow_report.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error processing file: {e}")
 else:
     st.info("Please upload the Caliper Report CSV to begin.")
